@@ -278,8 +278,39 @@ def write_drift_selections(path: str, prefs: pd.DataFrame):
     write_row_table(path, prefs[['Standard', 'Interpolation', 'Exclusions']], 'Sheet1')
 
 
+CAL_PREF_COLUMNS = ['NormElement', 'ForceInterceptZero', 'StandardSet', 'CalExclusions', 'Weighting', 'Calibrants']
+
+
+def _cal_pref_frame(prefs: pd.DataFrame) -> pd.DataFrame:
+    cols = [c for c in CAL_PREF_COLUMNS if c in prefs.columns]
+    return prefs[cols]
+
+
 def write_calibration_selections(path: str, prefs: pd.DataFrame):
-    write_row_table(path, prefs[['NormElement', 'ForceInterceptZero', 'StandardSet', 'CalExclusions']], 'Sheet1')
+    write_row_table(path, _cal_pref_frame(prefs), 'Sheet1')
+
+
+def read_dwell_times(path: str, sig_vars: Sequence[str], default_s: float) -> np.ndarray:
+    """DwellTimes.xlsx: Row = isotope (MATLAB column name), dwell_s. Missing file
+    or isotope -> default."""
+    out = np.full(len(sig_vars), float(default_s))
+    if not os.path.isfile(path):
+        return out
+    try:
+        df = read_row_table(path, numeric=True)
+    except Exception:
+        return out
+    if 'dwell_s' not in df.columns:
+        return out
+    for i, v in enumerate(sig_vars):
+        if v in df.index and np.isfinite(df.loc[v, 'dwell_s']) and df.loc[v, 'dwell_s'] > 0:
+            out[i] = float(df.loc[v, 'dwell_s'])
+    return out
+
+
+def write_dwell_times(path: str, dwell: Dict[str, float]):
+    df = pd.DataFrame({'dwell_s': [float(v) for v in dwell.values()]}, index=list(dwell.keys()))
+    write_row_table(path, df, 'Sheet1')
 
 
 def write_drift_corrected(path: str, lt_corr: np.ndarray, sig_vars: Sequence[str],
@@ -300,8 +331,8 @@ def write_reduced_export(path: str, final: np.ndarray, sig_vars: Sequence[str],
                          display_names: Sequence[str], first_in_times: np.ndarray,
                          sem: Optional[np.ndarray], std_vals: Optional[pd.DataFrame],
                          intervals: Optional[pd.DataFrame], drift_prefs: Optional[pd.DataFrame],
-                         cal_prefs: Optional[pd.DataFrame]):
-    """exportCalibration(): the six-sheet reduced data workbook."""
+                         cal_prefs: Optional[pd.DataFrame], counting_err: Optional[np.ndarray] = None):
+    """exportCalibration(): the six-sheet reduced data workbook (+ Counting_Err_Pct)."""
     n = final.shape[0]
     fr = pd.DataFrame(final, columns=list(sig_vars), index=list(display_names))
     fr.insert(0, 'Analysis_Start_Time', np.asarray(first_in_times, float))
@@ -310,6 +341,8 @@ def write_reduced_export(path: str, final: np.ndarray, sig_vars: Sequence[str],
     sheets = [('FinalResult', fr, 'Row', header)]
     if sem is not None:
         sheets.append(('Signal_SEM_Norm', pd.DataFrame(sem, columns=list(sig_vars), index=list(display_names)), 'Row', None))
+    if counting_err is not None:
+        sheets.append(('Counting_Err_Pct', pd.DataFrame(counting_err, columns=list(sig_vars), index=list(display_names)), 'Row', None))
     if std_vals is not None:
         sheets.append(('StandardValues', std_vals, None, None))
     if intervals is not None:
@@ -317,6 +350,5 @@ def write_reduced_export(path: str, final: np.ndarray, sig_vars: Sequence[str],
     if drift_prefs is not None:
         sheets.append(('DriftSelections', drift_prefs[['Standard', 'Interpolation', 'Exclusions']], 'Row', None))
     if cal_prefs is not None:
-        sheets.append(('CalibrationSelections',
-                       cal_prefs[['NormElement', 'ForceInterceptZero', 'StandardSet', 'CalExclusions']], 'Row', None))
+        sheets.append(('CalibrationSelections', _cal_pref_frame(cal_prefs), 'Row', None))
     write_sheets(path, sheets)

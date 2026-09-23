@@ -1,5 +1,5 @@
 """Standard recovery plots: reference value vs. reduced value, linear axes, for
-BHV / BCR / BIR / GSD on every analyte, with error bars from the internal
+BHV / BCR / BIR / GSD / GSE / STH on every analyte, with error bars from the internal
 uncertainty of each individual analysis.
 
     python plot_standard_recovery.py <data file.xlsx> [--std FILE] [--out DIR] [--tag NAME]
@@ -43,6 +43,8 @@ STANDARDS = [  # key in session.sets, label, standards-table match, marker, colo
     ('BCR', 'BCR', 'BCR', '^', '#d97706'),
     ('BIR', 'BIR', 'BIR', 's', '#059669'),
     ('GSD', 'GSD', 'GSD1G', 'D', '#7c3aed'),
+    ('GSE', 'GSE', 'GSE1G', 'v', '#db2777'),
+    ('STH', 'STH', 'STHS', 'P', '#0891b2'),
 ]
 
 

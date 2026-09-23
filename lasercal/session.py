@@ -26,17 +26,19 @@ from . import core, io_xlsx
 from .names import clean_sample_names
 
 STD_FILE_NAME = 'LAICPMS_Standard_Values.xlsx'
+DWELL_FILE_NAME = 'DwellTimes.xlsx'
 
 
 @dataclass
 class UIState:
     """Current values of the dropdowns / checkboxes the MATLAB code reads as
     fall-backs.  Defaults equal the MATLAB initial UI state."""
-    drift_std: str = 'BHV'
-    drift_interp: str = 'pchip'
+    drift_std: str = 'ALL'          # ALL = pooled, count-weighted over every standard
+    drift_interp: str = 'auto'      # auto = pchip through precise bracket means, else poly2
     cal_norm: Optional[str] = None   # None -> first available choice (showChoices{1})
     force_zero: bool = True
     harvard: bool = False
+    weighting: str = 'ivw'          # calibration: inverse-variance weighted log mean
 
 
 class IntervalsCreated(Exception):
@@ -67,10 +69,15 @@ class ReductionSession:
         self.norm_map = {}
         self.show_choices: List[str] = []
         self.sets: Dict[str, np.ndarray] = {}
+        self.dwell_s: Optional[np.ndarray] = None      # per sig_var (s)
 
         # drift state
         self.av_total: Optional[np.ndarray] = None
         self.av_back: Optional[np.ndarray] = None
+        self.stats: Optional[core.SignalStats] = None
+        self.cnt_err: Optional[np.ndarray] = None       # counting error % per (analysis, isotope)
+        self.norm_idx: List[int] = []                   # normaliser column per analyte
+        self.ratio_drift: List[bool] = []               # True where the drift factor applies to the ratio
         self.drift_grid: Optional[np.ndarray] = None
         self.lt_corr: Optional[np.ndarray] = None
         self.sem_pct: Optional[np.ndarray] = None
@@ -92,6 +99,8 @@ class ReductionSession:
     def cal_prefs_path(self): return os.path.join(self.folder, 'CalibrationSelections.xlsx')
     @property
     def sample_windows_path(self): return os.path.join(self.folder, 'SampleWindows.xlsx')
+    @property
+    def dwell_path(self): return os.path.join(self.folder, DWELL_FILE_NAME)
 
     @property
     def n_samples(self): return len(self.display_names)
@@ -140,6 +149,7 @@ class ReductionSession:
         self.norm_map = core.build_norm_map(self.sig_vars)
         self.show_choices = core.norm_choices(self.sig_vars, self.norm_map)
         self.sets = core.standard_idx_sets(self.display_names)
+        self.dwell_s = io_xlsx.read_dwell_times(self.dwell_path, self.sig_vars, core.DWELL_S_DEFAULT)
 
         if os.path.isfile(self.intervals_path):
             self.intervals = io_xlsx.read_intervals(self.intervals_path)
@@ -167,7 +177,7 @@ class ReductionSession:
             except Exception:
                 prefs = None
         if prefs is None:
-            prefs = pd.DataFrame({'Standard': 'BHV', 'Interpolation': 'pchip', 'Exclusions': ''},
+            prefs = pd.DataFrame({'Standard': self.ui.drift_std, 'Interpolation': self.ui.drift_interp, 'Exclusions': ''},
                                  index=self.sig_vars, dtype=object)
             write_back = not os.path.isfile(fp)
         for c in cols:
@@ -175,7 +185,7 @@ class ReductionSession:
                 prefs[c] = ''
         missing = [v for v in self.sig_vars if v not in prefs.index]
         if missing:
-            add = pd.DataFrame({'Standard': 'BHV', 'Interpolation': 'pchip', 'Exclusions': ''},
+            add = pd.DataFrame({'Standard': self.ui.drift_std, 'Interpolation': self.ui.drift_interp, 'Exclusions': ''},
                                index=missing, dtype=object)
             prefs = pd.concat([prefs, add])
             write_back = True
@@ -189,7 +199,7 @@ class ReductionSession:
 
     def load_or_init_cal_prefs(self) -> pd.DataFrame:
         """loadOrInitCalibrationPrefs (never writes the file)."""
-        cols = ['NormElement', 'ForceInterceptZero', 'StandardSet', 'CalExclusions']
+        cols = io_xlsx.CAL_PREF_COLUMNS
         fp = self.cal_prefs_path
         default_key = self.cal_norm_default
         prefs = None
@@ -209,10 +219,16 @@ class ReductionSession:
             prefs['StandardSet'] = ['GeoRem'] * n
         if 'CalExclusions' not in prefs.columns:
             prefs['CalExclusions'] = ['None'] * n
+        if 'Weighting' not in prefs.columns:
+            prefs['Weighting'] = [self.ui.weighting] * n
+        if 'Calibrants' not in prefs.columns:
+            prefs['Calibrants'] = [' '.join(core.PRIMARY_STDS)] * n
         missing = [v for v in self.sig_vars if v not in prefs.index]
         if missing:
             add = pd.DataFrame({'NormElement': default_key, 'ForceInterceptZero': True,
-                                'StandardSet': 'GeoRem', 'CalExclusions': 'None'}, index=missing, dtype=object)
+                                'StandardSet': 'GeoRem', 'CalExclusions': 'None',
+                                'Weighting': self.ui.weighting, 'Calibrants': ' '.join(core.PRIMARY_STDS)},
+                               index=missing, dtype=object)
             prefs = pd.concat([prefs, add])
         return prefs.loc[self.sig_vars, cols].astype(object)
 
@@ -252,22 +268,56 @@ class ReductionSession:
         """runDrift(): background-corrected averages, drift grid, corrected data
         and the SEM% matrix used for error bars."""
         prefs = self.load_or_init_drift_prefs()
-        self.av_total, self.av_back = core.compute_averaged_signals(self.windows, self.intervals, self.sig_vars)
+        self.stats = core.compute_signal_stats(self.windows, self.intervals, self.sig_vars)
+        self.av_total, self.av_back = self.stats.av_total, self.stats.av_back
+        self.cnt_err = core.counting_error_pct(self.stats, self.dwell_s)
+        cal_prefs = self.load_or_init_cal_prefs()
+        self.norm_idx = core.norm_index_for(self.sig_vars, cal_prefs, self.norm_map, self.cal_norm_default)
         try:
-            cal_prefs = self.load_or_init_cal_prefs()
             self.sem_pct = core.compute_sem_backcorr_normalized(self.windows, self.intervals, self.sig_vars,
                                                                  self.norm_map, cal_prefs)
         except Exception:
             self.sem_pct = None
         self.drift_grid = core.compute_drift_grid(self.av_total, self.first_in_times, self.sig_vars, prefs,
-                                                  self.sets, self.ui.drift_std, self.ui.drift_interp)
+                                                  self.sets, self.ui.drift_std, self.ui.drift_interp,
+                                                  cnt_err=self.cnt_err, norm_idx=self.norm_idx)
+        self.ratio_drift = [core.resolve_drift_pref(prefs, el, self.ui.drift_std, self.ui.drift_interp).standard == 'ALL'
+                            for el in self.sig_vars]
+        # lt_corr keeps the legacy meaning (drift-corrected signals); under the pooled model the
+        # factor is a ratio drift, so lt_corr/normaliser is the corrected ratio only when the
+        # normaliser's own factor is 1 (it is, except for the normaliser's own row).
         self.lt_corr = self.av_total * (1.0 / self.drift_grid)
         return self.lt_corr
 
     def drift_diag(self, el: str) -> core.DriftElementDiag:
         prefs = self.load_or_init_drift_prefs()
         return core.drift_diagnostics(self.av_total, self.first_in_times, self.sig_vars, prefs, self.sets, el,
-                                      self.ui.drift_std, self.ui.drift_interp)
+                                      self.ui.drift_std, self.ui.drift_interp, cnt_err=self.cnt_err,
+                                      norm_idx=self.norm_idx)
+
+    def measured_ratios(self) -> np.ndarray:
+        """Drift-corrected analyte/normaliser ratios, exactly as the calibration uses them."""
+        out = np.full_like(self.av_total, np.nan, dtype=float)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            for j, ni in enumerate(self.norm_idx):
+                if self.ratio_drift[j]:
+                    out[:, j] = (self.av_total[:, j] / np.fmax(self.av_total[:, ni], core.EPS)) / self.drift_grid[:, j]
+                else:
+                    out[:, j] = self.lt_corr[:, j] / np.fmax(self.lt_corr[:, ni], core.EPS)
+        return out
+
+    def ratio_error_pct(self) -> np.ndarray:
+        """Counting error (%) of each analyte/normaliser ratio, per analysis."""
+        return np.column_stack([core.ratio_error_pct(self.cnt_err, j, ni) for j, ni in enumerate(self.norm_idx)])
+
+    def standard_consistency(self) -> pd.DataFrame:
+        return core.standard_consistency(self.cal_elements, self.sig_vars, self.display_names, self.sets,
+                                         self.std_vals, self.measured_ratios(), self.cnt_err, self.norm_idx)
+
+    def downhole_slopes(self, keys=None) -> pd.DataFrame:
+        keys = keys or [k for k in core.STANDARD_TAGS if self.sets.get(k, np.array([], int)).size > 0]
+        idx = np.concatenate([self.sets[k] for k in keys]) if keys else np.array([], int)
+        return core.downhole_slopes(self.windows, self.intervals, self.sig_vars, self.norm_idx, idx)
 
     def export_drift_corrected(self, path: Optional[str] = None) -> str:
         if self.lt_corr is None:
@@ -294,7 +344,8 @@ class ReductionSession:
         self.cal_elements, self.final_result = core.calibrate_all(
             self.lt_corr, self.sig_vars, self.display_names, self.sets, self.std_vals, cal_prefs,
             self.norm_map, self.intervals, self.cal_norm_default, self.ui.force_zero, self.ui.harvard,
-            self.cal_excl_memory)
+            self.cal_excl_memory, av_total=self.av_total, drift_grid=self.drift_grid, cnt_err=self.cnt_err,
+            ratio_drift=self.ratio_drift, ui_weighting=self.ui.weighting)
         return self.final_result
 
     def summary_rows(self, analyte: str):
@@ -319,5 +370,6 @@ class ReductionSession:
         sem = self.compute_sem_for_export()
         io_xlsx.write_reduced_export(path, self.final_result, self.sig_vars, self.display_names,
                                      self.first_in_times, sem, self.std_vals, self.intervals,
-                                     self.load_or_init_drift_prefs(), self.load_or_init_cal_prefs())
+                                     self.load_or_init_drift_prefs(), self.load_or_init_cal_prefs(),
+                                     counting_err=self.ratio_error_pct() if self.cnt_err is not None else None)
         return path

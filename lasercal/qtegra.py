@@ -38,8 +38,22 @@ from .core import INTERVAL_COLUMNS
 TS_FORMATS = ('%m/%d/%Y %I:%M:%S %p', '%m/%d/%Y %H:%M:%S')
 
 
-def parse_file(path: str) -> Tuple[str, datetime, pd.DataFrame]:
-    """-> (sample name, acquisition timestamp, DataFrame with Time + isotopes)."""
+def parse_dwell_line(line: str, columns: Sequence[str]) -> Dict[str, float]:
+    """The ',dwell time=0.01;xcal factor=...' line -> {isotope: dwell seconds}."""
+    out = {}
+    cells = line.split(',')
+    for col, cell in zip(columns, cells[1:]):
+        m = re.search(r'dwell time=([0-9.eE+-]+)', cell)
+        if m:
+            try:
+                out[str(col)] = float(m.group(1))
+            except ValueError:
+                pass
+    return out
+
+
+def parse_file(path: str, want_dwell: bool = False):
+    """-> (sample name, acquisition timestamp, DataFrame with Time + isotopes[, dwell dict])."""
     with open(path, encoding='utf-8', errors='replace') as f:
         lines = f.read().splitlines()
     first = lines[0].rstrip(';').strip()
@@ -59,6 +73,10 @@ def parse_file(path: str) -> Tuple[str, datetime, pd.DataFrame]:
     df = pd.read_csv(io.StringIO('\n'.join(body)), index_col=False)
     df = df.loc[:, [c for c in df.columns if not str(c).startswith('Unnamed')]]
     df = df.apply(pd.to_numeric, errors='coerce')
+    if want_dwell:
+        dwell_line = next((l for l in lines[hdr + 1:] if l.startswith(',dwell')), '')
+        cols = [c for c in lines[hdr].split(',')[1:] if c]
+        return name.strip(), stamp, df, parse_dwell_line(dwell_line, cols)
     return name.strip(), stamp, df
 
 
@@ -89,10 +107,13 @@ def default_cal_prefs(sig_vars: Sequence[str], template: Optional[pd.DataFrame],
         r = tmpl.get(symbol(v))
         if r is not None:
             rows.append({'NormElement': str(r['NormElement']), 'ForceInterceptZero': bool(r['ForceInterceptZero']),
-                         'StandardSet': str(r['StandardSet']), 'CalExclusions': 'None'})
+                         'StandardSet': str(r['StandardSet']), 'CalExclusions': 'None',
+                         'Weighting': str(r['Weighting']) if 'Weighting' in r.index else 'ivw',
+                         'Calibrants': str(r['Calibrants']) if 'Calibrants' in r.index else 'BHV BCR BIR'})
         else:
             rows.append({'NormElement': norm_default, 'ForceInterceptZero': True,
-                         'StandardSet': 'GeoRem', 'CalExclusions': 'None'})
+                         'StandardSet': 'GeoRem', 'CalExclusions': 'None', 'Weighting': 'ivw',
+                         'Calibrants': 'BHV BCR BIR'})
     return pd.DataFrame(rows, index=list(sig_vars), dtype=object)
 
 
@@ -102,14 +123,19 @@ def build_data_folder(src_dir: str, out_dir: str, name: str,
                       back2: Optional[Tuple[float, float]] = None,
                       start_thresh: float = 1000.0, start_iso: str = 'x25Mg',
                       cal_template: Optional[pd.DataFrame] = None,
-                      drift_std: str = 'BHV', drift_interp: str = 'pchip',
+                      drift_std: str = 'ALL', drift_interp: str = 'auto',
                       norm_default: str = 'Al') -> Dict[str, str]:
     os.makedirs(out_dir, exist_ok=True)
     files = list_files(src_dir)
     if not files:
         raise FileNotFoundError(f'no CSV files in {src_dir}')
-    parsed = [parse_file(f) for f in files]
+    parsed4 = [parse_file(f, want_dwell=True) for f in files]
+    parsed = [p[:3] for p in parsed4]
     t0 = min(p[1] for p in parsed)
+    dwell_raw: Dict[str, float] = {}
+    for p in parsed4:
+        for k, v in p[3].items():
+            dwell_raw.setdefault(k, v)
 
     names, frames, windows, meta = [], [], [], []
     row0 = 0
@@ -141,6 +167,10 @@ def build_data_folder(src_dir: str, out_dir: str, name: str,
     io_xlsx.write_row_table(sw_path, pd.DataFrame(windows, index=disp), 'Sheet1')
     meta_path = os.path.join(out_dir, 'SourceFiles.xlsx')
     io_xlsx.write_table(meta_path, pd.DataFrame(meta), 'Sheet1')
+    dwell = {m: dwell_raw[c] for c, m in zip(dwell_raw.keys(), mangle_columns(list(dwell_raw.keys())))}
+    dwell_path = os.path.join(out_dir, 'DwellTimes.xlsx')
+    if dwell:
+        io_xlsx.write_dwell_times(dwell_path, dwell)
 
     iv = pd.DataFrame(np.nan, index=disp, columns=INTERVAL_COLUMNS)
     iv['back_start1'], iv['back_stop1'] = back1
