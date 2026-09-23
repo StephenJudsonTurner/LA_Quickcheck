@@ -56,11 +56,13 @@ Log = Callable[[str], None]
 
 SETTINGS_FILES = ('RunOrder.xlsx', 'Intervals.xlsx', 'DriftSelections.xlsx', 'CalibrationSelections.xlsx',
                   'SampleWindows.xlsx', 'DriftCorrected_All.xlsx', 'ReducedDataExport.xlsx', 'SourceFiles.xlsx',
-                  'LAICPMS_Standard_Values.xlsx', 'DwellTimes.xlsx', 'StandardConsistency.xlsx', 'DownholeSlopes.xlsx')
+                  'LAICPMS_Standard_Values.xlsx', 'DwellTimes.xlsx', 'StandardConsistency.xlsx', 'DownholeSlopes.xlsx',
+                  'NormaliserChoice.xlsx')
 
 SIGNAL_DELAY_S = 2.0     # signal starts this long after laser-on
 SIGNAL_TAIL_S = 2.0      # and ends this long before laser-off (of the standards' median ablation)
 BIAS_FLOOR_PCT = 5.0     # bias is reported only where the counting floor is below this
+NORM_SWITCH_MARGIN_PCT = 0.2   # a normaliser must beat the default's score by this to be chosen
 CONSISTENCY_FLAG_PCT = 5.0
 
 
@@ -152,6 +154,79 @@ def choose_calibration(sig_vars: List[str], norm_map) -> pd.DataFrame:
         rows.append({'NormElement': key, 'ForceInterceptZero': True, 'StandardSet': 'GeoRem', 'CalExclusions': 'None',
                      'Weighting': 'ivw', 'Calibrants': ' '.join(core.default_calibrants(v))})
     return pd.DataFrame(rows, index=sig_vars, dtype=object)
+
+
+def normaliser_scores(s: ReductionSession) -> pd.DataFrame:
+    """For the normaliser the session is currently set to: per analyte, the RMS
+    over standards of the replicate RSD of the drift-corrected ratio (precision)
+    and the spread (std of log) of the apparent sensitivity across the standards
+    with reference values (accuracy), both in %, using only standards whose
+    counting error for the ratio is below BIAS_FLOOR_PCT."""
+    ratio = s.measured_ratios(); err = s.ratio_error_pct(); std = s.std_vals
+    rows = {}
+    for j, el in enumerate(s.sig_vars):
+        norm_iso = s.sig_vars[s.norm_idx[j]]
+        rsds, sens = [], []
+        for k in core.STANDARD_TAGS:
+            idx = s.sets.get(k, np.array([], int))
+            if idx.size < 3 or np.nanmedian(err[idx, j]) > BIAS_FLOOR_PCT:
+                continue
+            v = ratio[idx, j]
+            if not np.all(np.isfinite(v)) or np.mean(v) <= 0:
+                continue
+            rsds.append(100 * np.std(v, ddof=1) / np.mean(v))
+            ri = core.std_row_index(std, k, 'GeoRem')
+            if ri is None or el not in std.columns or norm_iso not in std.columns:
+                continue
+            tgt = pd.to_numeric(pd.Series([std[el].iloc[ri], std[norm_iso].iloc[ri]]), errors='coerce').to_numpy(float)
+            if np.all(np.isfinite(tgt)) and tgt[0] > 0 and tgt[1] > 0:
+                sens.append(np.log(np.mean(v) / (tgt[0] / tgt[1])))
+        prec = float(np.sqrt(np.mean(np.square(rsds)))) if rsds else np.nan
+        acc = float(100 * np.std(sens)) if len(sens) >= 3 else np.nan
+        rows[el] = {'precision': prec, 'accuracy': acc,
+                    'score': float(np.sqrt(np.nansum([prec ** 2, acc ** 2]))) if rsds else np.nan,
+                    'n_std_prec': len(rsds), 'n_std_acc': len(sens)}
+    return pd.DataFrame(rows).T
+
+
+def choose_normalisers(s: ReductionSession, cal: pd.DataFrame, log: Log) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Try every available normaliser on the whole run and keep, per analyte, the
+    one with the lowest combined score; the default (from choose_calibration)
+    is kept unless another beats it by NORM_SWITCH_MARGIN_PCT.  Returns the
+    updated calibration preferences and the score table."""
+    cands = list(s.show_choices)
+    default = cal['NormElement'].copy()
+    scores = {}
+    for key in cands:
+        trial = cal.copy()
+        for el in trial.index:
+            trial.loc[el, 'NormElement'] = key if s.norm_map[key]['iso'] != el else next(
+                (k for k in cands if s.norm_map[k]['iso'] != el), key)
+        io_xlsx.write_calibration_selections(s.cal_prefs_path, trial)
+        s.run_drift(); s.calibrate()
+        scores[key] = normaliser_scores(s)
+    table = pd.concat({k: v[['precision', 'accuracy', 'score']] for k, v in scores.items()}, axis=1)
+    chosen = {}
+    for el in cal.index:
+        d = default[el]
+        best, best_score = d, scores[d].loc[el, 'score'] if d in scores else np.inf
+        for key in cands:
+            if s.norm_map[key]['iso'] == el:
+                continue
+            sc = scores[key].loc[el, 'score']
+            if np.isfinite(sc) and (not np.isfinite(best_score) or sc < best_score - NORM_SWITCH_MARGIN_PCT):
+                best, best_score = key, sc
+        chosen[el] = best
+    cal = cal.copy(); cal['NormElement'] = pd.Series(chosen)
+    io_xlsx.write_calibration_selections(s.cal_prefs_path, cal)
+    flat = table.copy(); flat.columns = [f'{a}_{b}' for a, b in table.columns]
+    flat['chosen'] = pd.Series(chosen)
+    io_xlsx.write_row_table(os.path.join(s.folder, 'NormaliserChoice.xlsx'), flat, 'Sheet1')
+    changed = {el: (default[el], chosen[el]) for el in cal.index if chosen[el] != default[el]}
+    log('normaliser per analyte (score = replicate RSD and cross-standard spread in quadrature, %): ' +
+        ', '.join(f'{k}: {int((cal.NormElement == k).sum())}' for k in cands) +
+        (('; changed from the default: ' + ', '.join(f'{el} {a}->{b}' for el, (a, b) in changed.items())) if changed else '; none changed'))
+    return cal, flat
 
 
 def auto_exclusions(s: ReductionSession, n_sigma: float = 4.0, min_rel: float = 0.10) -> Dict[str, List[str]]:
@@ -255,7 +330,9 @@ def run_checker(input_path: str, out_dir: Optional[str] = None, std_file: Option
         f'log-mean sensitivity over BHV/BCR/BIR, GeoRem values, replicates with > {core.MAX_CAL_ERR_PCT:g} % counting error dropped'
         + (f'; calibrants overridden for {special}' if special else ''))
 
-    # ---- reduce, find outliers, reduce again
+    # ---- pick the normaliser per analyte from the standards, then reduce, find outliers, reduce again
+    s = ReductionSession(data_path, std_file=std_file, ui=UIState()).load()
+    cal, _ = choose_normalisers(s, cal, log)
     s = ReductionSession(data_path, std_file=std_file, ui=UIState()).load()
     s.run_drift(); s.calibrate()
     excl = auto_exclusions(s)
@@ -444,6 +521,10 @@ def write_report(path, s: ReductionSession, kind, src, winfo, drift, excl, cal_d
 
     sets_txt = ', '.join(f'{k} ×{s.sets[k].size}' for k in core.STANDARD_TAGS if s.sets[k].size)
     n_auto = sum(len(el.auto_excluded) for el in s.cal_elements)
+    by_norm = {}
+    for el in s.cal_elements:
+        by_norm.setdefault(s.norm_map[el.norm_key]['iso'], []).append(el.analyte)
+    norm_html = '; '.join(f'<b>{e(k)}</b>: {e(" ".join(v))}' for k, v in by_norm.items())
     special = [(el.analyte, ' '.join(el.calibrants)) for el in s.cal_elements if list(el.calibrants) != list(core.PRIMARY_STDS)]
     special_html = (' Calibrants overridden for ' + ', '.join(f'{e(a)} ({e(c)})' for a, c in special) + '.') if special else ''
     doc = f"""<!DOCTYPE html><html><head><meta charset="utf-8"><title>Data check report</title>
@@ -460,7 +541,7 @@ td,th{{border:1px solid #d1d5db;padding:3px 8px;text-align:right}}th{{background
 <li>Background: 1 s to laser-on − 2 s. Signal: laser-on + {SIGNAL_DELAY_S:g} s for {winfo['signal_length_s']:.1f} s (laser-on median {winfo['laser_on_median_s']:.1f} s, standards' ablation median {winfo['ablation_median_s']:.1f} s). Second background: {winfo['second_background']}.</li>
 {short_html}
 <li>Drift: {e(drift[2])}.</li>
-<li>Calibration: BHV, BCR, BIR vs GeoRem values, normalised to {e(s.norm_map['Al']['iso'] if s.norm_map['Al']['iso'] in s.sig_vars else s.norm_map['Ca']['iso'])} (27Al to Ca); slope = inverse-variance weighted mean of log(target/measured) over the calibrant replicates; {n_auto} replicate values dropped for counting error &gt; {core.MAX_CAL_ERR_PCT:g} %.{special_html}</li>
+<li>Calibration: BHV, BCR, BIR vs GeoRem values. Normaliser chosen per analyte from the standards (lowest replicate RSD and cross-standard spread in quadrature, <code>data/NormaliserChoice.xlsx</code>): {norm_html}; slope = inverse-variance weighted mean of log(target/measured) over the calibrant replicates; {n_auto} replicate values dropped for counting error &gt; {core.MAX_CAL_ERR_PCT:g} %.{special_html}</li>
 <li>Auto-excluded calibrant replicates (&gt; 4 robust σ and &gt; 10 % from their own standard's other replicates): {e('; '.join(f'{k}: {" ".join(v)}' for k, v in excl.items()) if excl else 'none')}.</li>
 <li>Internal-standard oxide wt% were autofilled for BHV, BCR, BIR, GSD, GSE, StHS, VE32 and GOR-128 only. <b>{len(zero_rows)} samples have no oxide value and therefore read 0</b>: fill <code>data/Intervals.xlsx</code> and re-run the reduction.</li>
 </ul>
