@@ -86,6 +86,9 @@ def test_weighted_log_slope_ignores_noisy_points():
 def test_parse_calibrants_and_weighting():
     assert core.parse_calibrants('BHV, BCR GSD') == ['BHV', 'BCR', 'GSD']
     assert core.parse_calibrants(None) == list(core.PRIMARY_STDS)
+    assert core.parse_calibrants(None, 'x65Cu') == ['BHV', 'BIR']      # BCR-2G Cu dropped by default
+    assert core.parse_calibrants('BHV BCR BIR', 'x65Cu') == ['BHV', 'BCR', 'BIR']  # explicit wins
+    assert core.default_calibrants('x63Cu') == ['BHV', 'BIR'] and core.default_calibrants('x88Sr') == list(core.PRIMARY_STDS)
     prefs = pd.DataFrame({'Weighting': ['OLS0', 'bogus']}, index=['a', 'b'])
     assert core.cal_weighting(prefs, 'a') == 'ols0' and core.cal_weighting(prefs, 'b') == 'ivw'
 

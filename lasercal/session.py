@@ -222,12 +222,13 @@ class ReductionSession:
         if 'Weighting' not in prefs.columns:
             prefs['Weighting'] = [self.ui.weighting] * n
         if 'Calibrants' not in prefs.columns:
-            prefs['Calibrants'] = [' '.join(core.PRIMARY_STDS)] * n
+            prefs['Calibrants'] = [' '.join(core.default_calibrants(a)) for a in prefs.index]
         missing = [v for v in self.sig_vars if v not in prefs.index]
         if missing:
             add = pd.DataFrame({'NormElement': default_key, 'ForceInterceptZero': True,
                                 'StandardSet': 'GeoRem', 'CalExclusions': 'None',
-                                'Weighting': self.ui.weighting, 'Calibrants': ' '.join(core.PRIMARY_STDS)},
+                                'Weighting': self.ui.weighting,
+                                'Calibrants': [' '.join(core.default_calibrants(a)) for a in missing]},
                                index=missing, dtype=object)
             prefs = pd.concat([prefs, add])
         return prefs.loc[self.sig_vars, cols].astype(object)

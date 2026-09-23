@@ -150,7 +150,7 @@ def choose_calibration(sig_vars: List[str], norm_map) -> pd.DataFrame:
         else:
             key = 'Al' if have_al else ('Ca' if have_ca else 'Si')
         rows.append({'NormElement': key, 'ForceInterceptZero': True, 'StandardSet': 'GeoRem', 'CalExclusions': 'None',
-                     'Weighting': 'ivw', 'Calibrants': ' '.join(core.PRIMARY_STDS)})
+                     'Weighting': 'ivw', 'Calibrants': ' '.join(core.default_calibrants(v))})
     return pd.DataFrame(rows, index=sig_vars, dtype=object)
 
 
@@ -250,8 +250,10 @@ def run_checker(input_path: str, out_dir: Optional[str] = None, std_file: Option
     log(f'drift: {dreason}')
     cal = choose_calibration(s.sig_vars, s.norm_map)
     io_xlsx.write_calibration_selections(s.cal_prefs_path, cal)
+    special = '; '.join(f'{v}: {c}' for v, c in cal.Calibrants.items() if c != ' '.join(core.PRIMARY_STDS))
     log(f'calibration: normalised to {cal.NormElement.mode()[0]} (Ca for the Al isotope), inverse-variance weighted '
-        f'log-mean sensitivity over BHV/BCR/BIR, GeoRem values, replicates with > {core.MAX_CAL_ERR_PCT:g} % counting error dropped')
+        f'log-mean sensitivity over BHV/BCR/BIR, GeoRem values, replicates with > {core.MAX_CAL_ERR_PCT:g} % counting error dropped'
+        + (f'; calibrants overridden for {special}' if special else ''))
 
     # ---- reduce, find outliers, reduce again
     s = ReductionSession(data_path, std_file=std_file, ui=UIState()).load()
@@ -442,6 +444,8 @@ def write_report(path, s: ReductionSession, kind, src, winfo, drift, excl, cal_d
 
     sets_txt = ', '.join(f'{k} ×{s.sets[k].size}' for k in core.STANDARD_TAGS if s.sets[k].size)
     n_auto = sum(len(el.auto_excluded) for el in s.cal_elements)
+    special = [(el.analyte, ' '.join(el.calibrants)) for el in s.cal_elements if list(el.calibrants) != list(core.PRIMARY_STDS)]
+    special_html = (' Calibrants overridden for ' + ', '.join(f'{e(a)} ({e(c)})' for a, c in special) + '.') if special else ''
     doc = f"""<!DOCTYPE html><html><head><meta charset="utf-8"><title>Data check report</title>
 <style>body{{font-family:Segoe UI,Arial,sans-serif;margin:24px;color:#1f2328}}table{{border-collapse:collapse;font-size:13px}}
 td,th{{border:1px solid #d1d5db;padding:3px 8px;text-align:right}}th{{background:#f3f4f6}}td:first-child{{text-align:left}}
@@ -456,7 +460,7 @@ td,th{{border:1px solid #d1d5db;padding:3px 8px;text-align:right}}th{{background
 <li>Background: 1 s to laser-on − 2 s. Signal: laser-on + {SIGNAL_DELAY_S:g} s for {winfo['signal_length_s']:.1f} s (laser-on median {winfo['laser_on_median_s']:.1f} s, standards' ablation median {winfo['ablation_median_s']:.1f} s). Second background: {winfo['second_background']}.</li>
 {short_html}
 <li>Drift: {e(drift[2])}.</li>
-<li>Calibration: BHV, BCR, BIR vs GeoRem values, normalised to {e(s.norm_map['Al']['iso'] if s.norm_map['Al']['iso'] in s.sig_vars else s.norm_map['Ca']['iso'])} (27Al to Ca); slope = inverse-variance weighted mean of log(target/measured) over the calibrant replicates; {n_auto} replicate values dropped for counting error &gt; {core.MAX_CAL_ERR_PCT:g} %.</li>
+<li>Calibration: BHV, BCR, BIR vs GeoRem values, normalised to {e(s.norm_map['Al']['iso'] if s.norm_map['Al']['iso'] in s.sig_vars else s.norm_map['Ca']['iso'])} (27Al to Ca); slope = inverse-variance weighted mean of log(target/measured) over the calibrant replicates; {n_auto} replicate values dropped for counting error &gt; {core.MAX_CAL_ERR_PCT:g} %.{special_html}</li>
 <li>Auto-excluded calibrant replicates (&gt; 4 robust σ and &gt; 10 % from their own standard's other replicates): {e('; '.join(f'{k}: {" ".join(v)}' for k, v in excl.items()) if excl else 'none')}.</li>
 <li>Internal-standard oxide wt% were autofilled for BHV, BCR, BIR, GSD, GSE, StHS, VE32 and GOR-128 only. <b>{len(zero_rows)} samples have no oxide value and therefore read 0</b>: fill <code>data/Intervals.xlsx</code> and re-run the reduction.</li>
 </ul>

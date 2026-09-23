@@ -52,7 +52,7 @@ Command line: `DataChecker.exe <input folder>` or `DataChecker.exe --rerun <..._
 | Sample windows | CSV input: each file is one analysis. Workbook input: the MATLAB threshold search (25Mg ≥ 1000, 80-row gap). |
 | Background / signal | From the 25Mg trace of each analysis: background 1 s → laser-on − 2 s; signal laser-on + 2 s for (standards' median ablation − 4 s), the same length for every sample. The first second carries a surface Pb/Cu spike and a sweep-timing artefact; the primaries are counting-limited, so the window is the whole ablation. An unknown that ablated for less gets its own (ablation − 4 s) window and is flagged in the report. Second background only when ≥ 12 s of clean blank follow the ablation. |
 | Drift | `ALL` / `auto`: every recognised standard in every bracket is pooled. For each element the ratio to its normaliser is divided by that standard's own count-weighted run mean, then averaged per bracket with weights 1/(counting error² + 0.5 %²). pchip through the bracket means when they are good to 1.5 %, quadratic otherwise. The factor applies to the ratio, so the normaliser isotope itself carries no correction. Set a single key (BHV …) and a MATLAB method per element in `DriftSelections.xlsx` to get the legacy single-standard model on the raw signal. |
-| Calibration | Normalised to Al (Ca for the Al isotope). Slope = inverse-variance weighted mean of log(target / measured) over the BHV/BCR/BIR replicates (`Weighting` = `ivw`; `logmean`, `ols0` (legacy through-zero OLS), `ols` also available per element). Replicates with > 10 % counting error are dropped from the fit. `Calibrants` lists the standards used (any of BHV BCR BIR GSD GSE STH). GeoRem values. |
+| Calibration | Normalised to Al (Ca for the Al isotope). Slope = inverse-variance weighted mean of log(target / measured) over the BHV/BCR/BIR replicates (`Weighting` = `ivw`; `logmean`, `ols0` (legacy through-zero OLS), `ols` also available per element). Replicates with > 10 % counting error are dropped from the fit. `Calibrants` lists the standards used (any of BHV BCR BIR GSD GSE STH); default BHV BCR BIR except Cu, which uses BHV BIR because the BCR-2G Cu value is inconsistent with every other standard (`core.DEFAULT_CALIBRANTS`). GeoRem values. |
 | Exclusions | A calibrant replicate more than 4 robust σ and more than 10 % from its own standard's other replicates is excluded (never more than a third of a standard's points). Standard-to-standard offsets are reported in the consistency table, not "fixed". |
 | Oxide wt% | Autofilled for BHV, BCR, BIR, GSD, GSE, StHS, VE32, GOR-128. Unknowns read 0 until you enter their Al2O3 / CaO in `data/Intervals.xlsx` and re-run. |
 
@@ -89,6 +89,13 @@ is > 5 %), the consistency of every standard against the calibration (a standard
 one element = that reference value; off for every element = its internal-standard oxide or
 normaliser), the standards' down-hole fractionation slopes, and the list of unknowns that
 ablated for less than the standards.
+
+Two reference-value checks done on this run: the GeoRem rows beat the Harvard rows (median
+spread among the primaries 3.7 % vs 6.4 %, driven by the Harvard BIR-1G row; Harvard is
+better only for Sr and Pb, selectable per element via `StandardSet`). For Pb, clipping more
+of the early signal does not help: the surface spike is confined to the first second, and the
+±9 % BHV/BCR disagreement is the BCR-2G reference value (calibrating Pb on `BHV BIR` brings
+GSD to −1 % and StHs to +8 %).
 
 Legacy behaviour is one setting away: `Standard` = a single key and a MATLAB method in
 `DriftSelections.xlsx`, `Weighting` = `ols0` in `CalibrationSelections.xlsx`, and the

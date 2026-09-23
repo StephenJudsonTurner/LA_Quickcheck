@@ -64,6 +64,11 @@ MAX_CAL_ERR_PCT = 10.0      # calibrant points with a larger counting error are 
 # Calibration weighting schemes (CalibrationSelections 'Weighting')
 VALID_WEIGHTINGS = ('ivw', 'logmean', 'ols0', 'ols')
 
+# Default calibrant set per element symbol where one primary's reference value is
+# known to be inconsistent with the others (BCR-2G Cu reads ~15 % low against BHV,
+# BIR and GSD on every run checked). Everything else uses PRIMARY_STDS.
+DEFAULT_CALIBRANTS = {'Cu': ('BHV', 'BIR')}
+
 NORM_OXIDE_COL = {'Ca': 'CaO (wt%)', 'Al': 'Al2O3 (wt%)', 'Si': 'SiO2 (wt%)'}
 NORM_FALLBACK_ISO = {'Ca': 'x43Ca', 'Al': 'x27Al', 'Si': 'x29Si'}
 
@@ -782,13 +787,22 @@ def parse_cal_exclusions(value) -> List[str]:
     return [p for p in s.split() if p]
 
 
-def parse_calibrants(value) -> List[str]:
+def element_symbol(analyte: str) -> str:
+    """'x65Cu' -> 'Cu'."""
+    return re.sub(r'^x?\d+', '', str(analyte))
+
+
+def default_calibrants(analyte: str) -> List[str]:
+    return list(DEFAULT_CALIBRANTS.get(element_symbol(analyte), PRIMARY_STDS))
+
+
+def parse_calibrants(value, analyte: str = '') -> List[str]:
     """CalibrationSelections 'Calibrants': space/comma list of standard keys."""
     if is_blank(value):
-        return list(PRIMARY_STDS)
+        return default_calibrants(analyte)
     toks = [t.strip().upper() for t in re.split(r'[\s,;+]+', str(value)) if t.strip()]
     keys = [t for t in toks if t in STANDARD_TAGS]
-    return keys or list(PRIMARY_STDS)
+    return keys or default_calibrants(analyte)
 
 
 def cal_weighting(cal_prefs: pd.DataFrame, analyte: str, default: str = 'ivw') -> str:
@@ -904,7 +918,7 @@ def calibrate_all(lt_corr: np.ndarray, sig_vars: Sequence[str], display_names: S
         meas_all_cols.append(meas_norm)
         err = ratio_error_pct(cnt_err, j, ni) if cnt_err is not None else np.zeros(n_samples)
         set_name = cal_set_name(cal_prefs, analyte, ui_harvard)
-        calibrants = parse_calibrants(cal_prefs.loc[analyte, 'Calibrants']) if (analyte in cal_prefs.index and 'Calibrants' in cal_prefs.columns) else list(PRIMARY_STDS)
+        calibrants = parse_calibrants(cal_prefs.loc[analyte, 'Calibrants'], analyte) if (analyte in cal_prefs.index and 'Calibrants' in cal_prefs.columns) else default_calibrants(analyte)
         calibrants = [k for k in calibrants if sets.get(k, np.array([], int)).size > 0] or list(PRIMARY_STDS)
         targets = make_targets_by_set(std_vals, sig_vars, iso, set_name, calibrants)
         idx_all = np.concatenate([sets[k] for k in calibrants])
