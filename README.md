@@ -98,6 +98,16 @@ of the early signal does not help: the surface spike is confined to the first se
 ±9 % BHV/BCR disagreement is the BCR-2G reference value (calibrating Pb on `BHV BIR` brings
 GSD to −1 % and StHs to +8 %).
 
+Down-hole fractionation was assessed on the standards and nothing is corrected. For
+full-length analyses no scheme helps: the window mean beats a linear-fit intercept two-fold in
+precision, and the replicate scatter is uncorrelated with each spot's decay, slope or yield
+(all 42 standard ablations decay to 0.62 ± 0.02 of their initial Al). Referring short-window
+analyses to the standards' window with the standards' slopes did halve the bias in a
+leave-one-standard-out test (10 s windows: 1.1 → 0.6 %), but it assumes an unknown fractionates
+like the glass standards, which is not safe for inclusions, so it was not adopted. Analyses whose
+window is shorter than the standards' are flagged in the report with the slopes in
+`data/DownholeSlopes.xlsx` for the user to judge.
+
 Legacy behaviour is one setting away: `Standard` = a single key and a MATLAB method in
 `DriftSelections.xlsx`, `Weighting` = `ols0` in `CalibrationSelections.xlsx`, and the
 window of your choice in `Intervals.xlsx` reproduce the previous outputs exactly
