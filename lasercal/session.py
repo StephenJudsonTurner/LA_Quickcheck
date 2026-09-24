@@ -39,7 +39,6 @@ class UIState:
     force_zero: bool = True
     harvard: bool = False
     weighting: str = 'ivw'          # calibration: inverse-variance weighted log mean
-    downhole_correct: bool = True   # refer short-window analyses to the standards' window with the standards' slopes
 
 
 class IntervalsCreated(Exception):
@@ -82,8 +81,6 @@ class ReductionSession:
         self.drift_grid: Optional[np.ndarray] = None
         self.lt_corr: Optional[np.ndarray] = None
         self.sem_pct: Optional[np.ndarray] = None
-        self.dh_slopes: Optional[pd.DataFrame] = None   # standards' down-hole slopes per analyte
-        self.dh_factor: Optional[np.ndarray] = None     # per (analysis, analyte) ratio correction
 
         # calibration state
         self.cal_elements: List[core.CalElement] = []
@@ -291,12 +288,6 @@ class ReductionSession:
         # factor is a ratio drift, so lt_corr/normaliser is the corrected ratio only when the
         # normaliser's own factor is 1 (it is, except for the normaliser's own row).
         self.lt_corr = self.av_total * (1.0 / self.drift_grid)
-        self.dh_slopes = self.downhole_slopes()
-        std_idx = core.all_standard_idx(self.sets)
-        if self.ui.downhole_correct and len(self.dh_slopes):
-            self.dh_factor = core.downhole_factor(self.intervals, self.dh_slopes, self.sig_vars, std_idx)
-        else:
-            self.dh_factor = np.ones_like(self.av_total)
         return self.lt_corr
 
     def drift_diag(self, el: str) -> core.DriftElementDiag:
@@ -306,7 +297,7 @@ class ReductionSession:
                                       norm_idx=self.norm_idx)
 
     def measured_ratios(self) -> np.ndarray:
-        """Drift- and down-hole-corrected analyte/normaliser ratios, exactly as the calibration uses them."""
+        """Drift-corrected analyte/normaliser ratios, exactly as the calibration uses them."""
         out = np.full_like(self.av_total, np.nan, dtype=float)
         with np.errstate(divide='ignore', invalid='ignore'):
             for j, ni in enumerate(self.norm_idx):
@@ -314,8 +305,6 @@ class ReductionSession:
                     out[:, j] = (self.av_total[:, j] / np.fmax(self.av_total[:, ni], core.EPS)) / self.drift_grid[:, j]
                 else:
                     out[:, j] = self.lt_corr[:, j] / np.fmax(self.lt_corr[:, ni], core.EPS)
-        if self.dh_factor is not None:
-            out = out * self.dh_factor
         return out
 
     def ratio_error_pct(self) -> np.ndarray:
@@ -357,7 +346,7 @@ class ReductionSession:
             self.lt_corr, self.sig_vars, self.display_names, self.sets, self.std_vals, cal_prefs,
             self.norm_map, self.intervals, self.cal_norm_default, self.ui.force_zero, self.ui.harvard,
             self.cal_excl_memory, av_total=self.av_total, drift_grid=self.drift_grid, cnt_err=self.cnt_err,
-            ratio_drift=self.ratio_drift, ui_weighting=self.ui.weighting, ratio_factor=self.dh_factor)
+            ratio_drift=self.ratio_drift, ui_weighting=self.ui.weighting)
         return self.final_result
 
     def summary_rows(self, analyte: str):
@@ -383,6 +372,5 @@ class ReductionSession:
         io_xlsx.write_reduced_export(path, self.final_result, self.sig_vars, self.display_names,
                                      self.first_in_times, sem, self.std_vals, self.intervals,
                                      self.load_or_init_drift_prefs(), self.load_or_init_cal_prefs(),
-                                     counting_err=self.ratio_error_pct() if self.cnt_err is not None else None,
-                                     downhole_factor=self.dh_factor)
+                                     counting_err=self.ratio_error_pct() if self.cnt_err is not None else None)
         return path

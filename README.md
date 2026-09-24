@@ -54,7 +54,6 @@ Command line: `DataChecker.exe <input folder>` or `DataChecker.exe --rerun <..._
 | Drift | `ALL` / `auto`: every recognised standard in every bracket is pooled. For each element the ratio to its normaliser is divided by that standard's own count-weighted run mean, then averaged per bracket with weights 1/(counting error² + 0.5 %²). pchip through the bracket means when they are good to 1.5 %, quadratic otherwise. The factor applies to the ratio, so the normaliser isotope itself carries no correction. Set a single key (BHV …) and a MATLAB method per element in `DriftSelections.xlsx` to get the legacy single-standard model on the raw signal. |
 | Normaliser | Chosen per analyte from the run's own standards: every available normaliser (Al, Ca, Si) is tried on the whole run and the one with the lowest score, replicate RSD and cross-standard spread of apparent sensitivity in quadrature, is kept (`data/NormaliserChoice.xlsx`); the Al default survives unless another beats it by 0.2 %. On `09_21_26_50um`: 22 analytes on Al, 7 on Ca, 5 on Si (Na, Ni, Cu, Ce, Pb). |
 | Calibration | Slope = inverse-variance weighted mean of log(target / measured) over the BHV/BCR/BIR replicates (`Weighting` = `ivw`; `logmean`, `ols0` (legacy through-zero OLS), `ols` also available per element). Replicates with > 10 % counting error are dropped from the fit. `Calibrants` lists the standards used (any of BHV BCR BIR GSD GSE STH); default BHV BCR BIR except Cu, which uses BHV BIR because the BCR-2G Cu value is inconsistent with every other standard (`core.DEFAULT_CALIBRANTS`). GeoRem values. |
-| Down-hole | The standards' slopes of analyte/normaliser inside the window (`data/DownholeSlopes.xlsx`, % per 10 s) are applied to any analysis whose window is shorter than the standards': ratio × exp(slope × ΔL / 2) refers it to the standards' window midpoint (`Downhole_Factor` sheet in the export; off with `UIState.downhole_correct = False`). Nothing changes for full-length analyses. |
 | Exclusions | A calibrant replicate more than 4 robust σ and more than 10 % from its own standard's other replicates is excluded (never more than a third of a standard's points). Standard-to-standard offsets are reported in the consistency table, not "fixed". |
 | Oxide wt% | Autofilled for BHV, BCR, BIR, GSD, GSE, StHS, VE32, GOR-128. Unknowns read 0 until you enter their Al2O3 / CaO in `data/Intervals.xlsx` and re-run. |
 
@@ -98,14 +97,6 @@ better only for Sr and Pb, selectable per element via `StandardSet`). For Pb, cl
 of the early signal does not help: the surface spike is confined to the first second, and the
 ±9 % BHV/BCR disagreement is the BCR-2G reference value (calibrating Pb on `BHV BIR` brings
 GSD to −1 % and StHs to +8 %).
-
-Down-hole fractionation was assessed on the standards too. Nothing improves full-length
-analyses: the window mean beats a linear-fit intercept by a factor of two in precision, and
-the replicate scatter is uncorrelated with each spot's own decay, slope or yield (all 42
-standard ablations decay to 0.62 ± 0.02 of their initial Al). For short signals the standards'
-slopes do transfer: integrating the standards over 10 s and correcting with slopes from the
-*other* standards halves the median bias against the 28-s value (1.1 → 0.6 %; 2.5 → 0.3 % for
-Si- and Ca-normalised analytes), which is what the correction above implements.
 
 Legacy behaviour is one setting away: `Standard` = a single key and a MATLAB method in
 `DriftSelections.xlsx`, `Weighting` = `ols0` in `CalibrationSelections.xlsx`, and the

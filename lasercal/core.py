@@ -882,7 +882,7 @@ def calibrate_all(lt_corr: np.ndarray, sig_vars: Sequence[str], display_names: S
                   in_memory_excl: Optional[Dict[str, List[str]]] = None,
                   av_total: Optional[np.ndarray] = None, drift_grid: Optional[np.ndarray] = None,
                   cnt_err: Optional[np.ndarray] = None, ratio_drift: Optional[Sequence[bool]] = None,
-                  ui_weighting: str = 'ivw', ratio_factor: Optional[np.ndarray] = None) -> Tuple[List[CalElement], np.ndarray]:
+                  ui_weighting: str = 'ivw') -> Tuple[List[CalElement], np.ndarray]:
     """calibrateAll -> (per-analyte fit info, FinalResult wt%).
 
     Measured ratio for analyte j: when ``ratio_drift[j]`` (pooled drift) the
@@ -891,7 +891,6 @@ def calibrate_all(lt_corr: np.ndarray, sig_vars: Sequence[str], display_names: S
     Weighting per analyte from CalibrationSelections 'Weighting' (ivw, logmean,
     ols0, ols); 'Calibrants' lists the standards used (default BHV BCR BIR).
     Calibrant points with a counting error above MAX_CAL_ERR_PCT are dropped.
-    ``ratio_factor`` (n x m) multiplies the measured ratios (down-hole correction).
     """
     sig_vars = list(sig_vars)
     display_names = list(display_names)
@@ -916,8 +915,6 @@ def calibrate_all(lt_corr: np.ndarray, sig_vars: Sequence[str], display_names: S
                 meas_norm = (av_total[:, j] / np.fmax(av_total[:, ni], EPS)) / drift_grid[:, j]
             else:
                 meas_norm = lt_corr[:, j] / np.fmax(lt_corr[:, ni], EPS)
-        if ratio_factor is not None:
-            meas_norm = meas_norm * ratio_factor[:, j]
         meas_all_cols.append(meas_norm)
         err = ratio_error_pct(cnt_err, j, ni) if cnt_err is not None else np.zeros(n_samples)
         set_name = cal_set_name(cal_prefs, analyte, ui_harvard)
@@ -999,23 +996,6 @@ def standard_consistency(elements: List[CalElement], sig_vars: Sequence[str], di
             r[(k, 'err%')] = 1.0 / np.sqrt(np.sum(w[good])) if np.isfinite(mu) else np.nan
         rows[el.analyte] = r
     return pd.DataFrame(rows).T
-
-
-def downhole_factor(intervals: pd.DataFrame, slopes: pd.DataFrame, sig_order: Sequence[str],
-                    ref_idx: np.ndarray) -> np.ndarray:
-    """Multiplicative correction that brings an analysis integrated over a
-    shorter signal window onto the standards' window: the window mean of a
-    ratio that decays as exp(slope*t) is its value at the window midpoint, so
-    ratio * exp(slope * (L_ref - L_i) / 2) refers it to the standards'
-    midpoint.  slopes: DataFrame from ``downhole_slopes`` (%/10 s, per
-    analyte for its normaliser); L_ref = median window length of ``ref_idx``.
-    Returns an (n_samples x n_sig) array of 1 where nothing changes."""
-    L = (pd.to_numeric(intervals['signal_stop'], errors='coerce') - pd.to_numeric(intervals['signal_start'], errors='coerce')).to_numpy(float)
-    ref = np.nanmedian(L[ref_idx]) if len(ref_idx) else np.nanmedian(L)
-    sl = np.array([slopes.loc[v, 'slope_pct_per_10s'] if v in slopes.index else np.nan for v in sig_order], float) / 1000.0
-    sl = np.where(np.isfinite(sl), sl, 0.0)
-    dL = np.where(np.isfinite(L), ref - L, 0.0)
-    return np.exp(np.outer(dL / 2.0, sl))
 
 
 def downhole_slopes(windows: List[pd.DataFrame], intervals: pd.DataFrame, sig_order: Sequence[str],

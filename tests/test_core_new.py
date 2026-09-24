@@ -98,12 +98,3 @@ def test_auto_method_switch():
     assert core._auto_method(7, 3.0) == 'poly2'
     assert core._auto_method(2, 0.1) == 'linear'
     assert core._auto_method(1, 0.1) == 'none'
-
-
-def test_downhole_factor_refers_short_window_to_reference():
-    iv = pd.DataFrame({'signal_start': [2.0, 2.0, 2.0], 'signal_stop': [30.0, 30.0, 12.0]})
-    slopes = pd.DataFrame({'slope_pct_per_10s': [-2.0, 0.0]}, index=['x88Sr', 'x27Al'])
-    f = core.downhole_factor(iv, slopes, ['x88Sr', 'x27Al'], np.array([0, 1]))
-    assert np.allclose(f[:2], 1.0)                              # reference-length analyses untouched
-    assert f[2, 1] == pytest.approx(1.0)                        # normaliser has no slope
-    assert f[2, 0] == pytest.approx(np.exp(-0.002 * (28 - 10) / 2))

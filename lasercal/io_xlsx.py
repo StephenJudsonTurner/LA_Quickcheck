@@ -331,8 +331,7 @@ def write_reduced_export(path: str, final: np.ndarray, sig_vars: Sequence[str],
                          display_names: Sequence[str], first_in_times: np.ndarray,
                          sem: Optional[np.ndarray], std_vals: Optional[pd.DataFrame],
                          intervals: Optional[pd.DataFrame], drift_prefs: Optional[pd.DataFrame],
-                         cal_prefs: Optional[pd.DataFrame], counting_err: Optional[np.ndarray] = None,
-                         downhole_factor: Optional[np.ndarray] = None):
+                         cal_prefs: Optional[pd.DataFrame], counting_err: Optional[np.ndarray] = None):
     """exportCalibration(): the six-sheet reduced data workbook (+ Counting_Err_Pct)."""
     n = final.shape[0]
     fr = pd.DataFrame(final, columns=list(sig_vars), index=list(display_names))
@@ -344,8 +343,6 @@ def write_reduced_export(path: str, final: np.ndarray, sig_vars: Sequence[str],
         sheets.append(('Signal_SEM_Norm', pd.DataFrame(sem, columns=list(sig_vars), index=list(display_names)), 'Row', None))
     if counting_err is not None:
         sheets.append(('Counting_Err_Pct', pd.DataFrame(counting_err, columns=list(sig_vars), index=list(display_names)), 'Row', None))
-    if downhole_factor is not None and not np.allclose(downhole_factor, 1.0):
-        sheets.append(('Downhole_Factor', pd.DataFrame(downhole_factor, columns=list(sig_vars), index=list(display_names)), 'Row', None))
     if std_vals is not None:
         sheets.append(('StandardValues', std_vals, None, None))
     if intervals is not None:

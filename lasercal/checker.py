@@ -416,7 +416,7 @@ def reduce_and_report(data_path, out_dir, std_file, log, kind, src, winfo, drift
     cons = s.standard_consistency()
     cons_flat = cons.copy(); cons_flat.columns = [f'{a}_{b}' for a, b in cons.columns]
     io_xlsx.write_row_table(os.path.join(data_dir, 'StandardConsistency.xlsx'), cons_flat, 'Sheet1')
-    dh = s.dh_slopes if s.dh_slopes is not None else s.downhole_slopes()
+    dh = s.downhole_slopes()
     io_xlsx.write_row_table(os.path.join(data_dir, 'DownholeSlopes.xlsx'), dh, 'Sheet1')
     log('StandardConsistency.xlsx and DownholeSlopes.xlsx written to data/')
 
@@ -509,22 +509,15 @@ def write_report(path, s: ReductionSession, kind, src, winfo, drift, excl, cal_d
                        f'<td>{fmt(dh.loc[a, "spread_pct_per_10s"], 2)}</td></tr>' for a in dh.index)
         dh_html = (f'<h2>Down-hole fractionation (standards)</h2><p>Slope of analyte/normaliser inside the signal '
                    f'window, % per 10 s (median over the standard analyses; spread = robust sigma between analyses). '
-                   f'An analysis integrated over a window shorter than the standards\' by &Delta;L has its ratios multiplied by '
-                   f'exp(slope &times; &Delta;L / 2), which refers them to the standards\' window midpoint (on this run\'s '
-                   f'standards that halves the 10-s-window bias to ~0.6 %). Table: <code>data/DownholeSlopes.xlsx</code>.</p>'
+                   f'An unknown integrated over a window that differs from the standards\' by &Delta;t inherits roughly '
+                   f'slope &times; &Delta;t/10 s of bias. Table: <code>data/DownholeSlopes.xlsx</code>.</p>'
                    f'<table><tr><th>Analyte</th><th>slope %/10 s</th><th>spread</th></tr>{drow}</table>')
 
     short_html = ''
     if winfo.get('short_signal'):
         items = ', '.join(f'{e(s.display_names[i])} ({l:.0f} s)' for i, l in zip(winfo['short_signal'], winfo['short_signal_len']))
-        dh = s.dh_factor
-        corr_txt = ''
-        if dh is not None and not np.allclose(dh, 1.0):
-            mx = max(abs(100 * (dh[i] - 1)).max() for i in winfo['short_signal'])
-            corr_txt = (f' Their ratios were referred to the standards\' window with the standards\' down-hole slopes '
-                        f'(largest correction {mx:.1f} %; factors in <code>ReducedDataExport.xlsx / Downhole_Factor</code>).')
         short_html = (f'<li><b>{len(winfo["short_signal"])} analyses ablated for less than the standards</b> and were integrated '
-                      f'over their own shorter window: {items}.{corr_txt}</li>')
+                      f'over their own shorter window: {items}. Their concentrations carry the down-hole mismatch listed below.</li>')
 
     sets_txt = ', '.join(f'{k} ×{s.sets[k].size}' for k in core.STANDARD_TAGS if s.sets[k].size)
     n_auto = sum(len(el.auto_excluded) for el in s.cal_elements)
