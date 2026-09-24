@@ -62,7 +62,14 @@ DRIFT_SE_SWITCH_PCT = 1.5   # 'auto' drift: interpolate when the bracket-mean er
 MAX_CAL_ERR_PCT = 10.0      # calibrant points with a larger counting error are dropped from the fit
 
 # Calibration weighting schemes (CalibrationSelections 'Weighting')
-VALID_WEIGHTINGS = ('ivw', 'logmean', 'ols0', 'ols')
+#   ivw     inverse-variance weighted log mean, Tukey-biweight robust, with per-standard common
+#           offsets (a standard whose every element reads x % high, i.e. an internal-standard
+#           oxide or normaliser-signal offset, is not allowed to bend the element slopes)
+#   ivw0    the same without robustness or offsets
+VALID_WEIGHTINGS = ('ivw', 'ivw0', 'logmean', 'ols0', 'ols')
+ROBUST_C = 4.685            # Tukey biweight tuning constant (in units of MAD)
+ROBUST_MAD_FLOOR = 0.01     # log units: never treat a spread below 1 % as 'tight'
+OFFSET_MAX_ERR_PCT = 5.0    # elements used to estimate a standard's common offset
 
 # Default calibrant set per element symbol where one primary's reference value is
 # known to be inconsistent with the others (BCR-2G Cu reads ~15 % low against BHV,
@@ -758,22 +765,49 @@ def linfit_through_origin(X, Y):
     return float(slope), float(r2)
 
 
-def weighted_log_slope(X, Y, err_pct, scheme: str = 'ivw'):
+def weighted_log_slope(X, Y, err_pct, scheme: str = 'ivw', log_offset=None):
     """Sensitivity slope as a weighted mean of log(target/measured) over the
-    calibrant points.  'ivw': weights 1/(err^2 + floor^2); 'logmean': equal
-    weights.  Returns (slope, R^2 of the through-origin line, n used)."""
+    calibrant points.  'ivw': weights 1/(err^2 + floor^2) times a Tukey
+    biweight on the residuals (points far from the consensus, e.g. a bad
+    reference value, lose weight); 'ivw0': the weights alone; 'logmean':
+    equal weights.  ``log_offset`` (per point) is added to log(target/measured)
+    (the standard's common offset).  Returns (slope, R^2 through origin, n used)."""
     X = np.asarray(X, float).ravel(); Y = np.asarray(Y, float).ravel(); E = np.asarray(err_pct, float).ravel()
+    O = np.zeros_like(X) if log_offset is None else np.asarray(log_offset, float).ravel()
     m = np.isfinite(X) & np.isfinite(Y) & (X > 0) & (Y > 0)
-    X, Y, E = X[m], Y[m], E[m]
+    X, Y, E, O = X[m], Y[m], E[m], O[m]
     if X.size < 1:
         return np.nan, np.nan, 0
-    w = _weights(E) if scheme == 'ivw' else np.ones_like(X)
+    w = _weights(E) if scheme in ('ivw', 'ivw0') else np.ones_like(X)
     if w.sum() <= 0:
         w = np.ones_like(X)
-    slope = float(np.exp(np.sum(w * np.log(Y / X)) / np.sum(w)))
+    v = np.log(Y / X) + O
+    if scheme == 'ivw' and X.size >= 3:
+        med = np.median(v)
+        mad = max(1.4826 * np.median(np.abs(v - med)), ROBUST_MAD_FLOOR)
+        u = np.abs(v - med) / (ROBUST_C * mad)
+        wr = w * np.where(u < 1, (1 - u ** 2) ** 2, 0.0)
+        if wr.sum() > 0:
+            w = wr
+    slope = float(np.exp(np.sum(w * v) / np.sum(w)))
     sse = np.sum((Y - slope * X) ** 2); sst0 = np.sum(Y ** 2)
     r2 = np.nan if sst0 <= EPS else 1 - sse / sst0
     return slope, float(r2), int(X.size)
+
+
+def standard_common_offsets(log_dev: Dict[str, Dict[str, float]], err: Dict[str, Dict[str, float]]) -> Dict[str, float]:
+    """Per-standard common offset: median over that standard's well-measured
+    elements (counting error < OFFSET_MAX_ERR_PCT) of log(measured*slope /
+    target).  Offsets are centred to zero mean so the overall scale is the
+    calibrants' mean.  log_dev[k][el], err[k][el] per standard key."""
+    c = {}
+    for k, d in log_dev.items():
+        vals = [v for el, v in d.items() if np.isfinite(v) and err.get(k, {}).get(el, np.inf) < OFFSET_MAX_ERR_PCT]
+        c[k] = float(np.median(vals)) if len(vals) >= 5 else 0.0
+    if c:
+        cm = float(np.mean(list(c.values())))
+        c = {k: v - cm for k, v in c.items()}
+    return c
 
 
 def parse_cal_exclusions(value) -> List[str]:
@@ -830,6 +864,7 @@ class CalElement:
     calibrants: List[str] = field(default_factory=lambda: list(PRIMARY_STDS))
     err_plot: np.ndarray = field(default_factory=lambda: np.array([]))   # counting error % per point
     auto_excluded: List[str] = field(default_factory=list)              # dropped by the counting-error cut
+    offsets: Dict[str, float] = field(default_factory=dict)             # per-calibrant common offset (log)
 
 
 def cal_norm_key(cal_prefs: pd.DataFrame, analyte: str, norm_map, ui_norm_key: str) -> str:
@@ -901,8 +936,40 @@ def calibrate_all(lt_corr: np.ndarray, sig_vars: Sequence[str], display_names: S
     n_samples = lt_corr.shape[0]
     if ratio_drift is None:
         ratio_drift = [False] * len(sig_vars)
+    offsets: Dict[str, float] = {}
+    for _pass in range(3):
+        elements, meas_all_cols, log_dev, err_by_std = _calibrate_pass(
+            lt_corr, sig_vars, display_names, sets, std_vals, cal_prefs, norm_map, ui_norm_key, ui_force_zero,
+            ui_harvard, in_memory_excl, av_total, drift_grid, cnt_err, ratio_drift, ui_weighting, offsets)
+        if not any(el.weighting == 'ivw' for el in elements):
+            break
+        new = standard_common_offsets(log_dev, err_by_std)
+        if all(abs(new.get(k, 0.0) - offsets.get(k, 0.0)) < 1e-4 for k in set(new) | set(offsets)):
+            offsets = new
+            break
+        offsets = new
+    for el in elements:
+        el.offsets = {k: float(v) for k, v in offsets.items() if k in el.calibrants}
+
+    final = np.zeros_like(lt_corr, dtype=float)
+    for j, el in enumerate(elements):
+        oxide_col = norm_map[el.norm_key]['oxideCol']
+        if oxide_col in intervals.columns:
+            ox = pd.to_numeric(intervals[oxide_col], errors='coerce').to_numpy(float)
+        else:
+            ox = np.zeros(n_samples)
+        ox = np.where(np.isnan(ox), 0.0, ox)
+        final[:, j] = (meas_all_cols[j] * el.slope + el.intercept) * ox
+    return elements, final
+
+
+def _calibrate_pass(lt_corr, sig_vars, display_names, sets, std_vals, cal_prefs, norm_map, ui_norm_key, ui_force_zero,
+                    ui_harvard, in_memory_excl, av_total, drift_grid, cnt_err, ratio_drift, ui_weighting, offsets):
+    n_samples = lt_corr.shape[0]
     elements: List[CalElement] = []
     meas_all_cols = []
+    log_dev: Dict[str, Dict[str, float]] = {}
+    err_by_std: Dict[str, Dict[str, float]] = {}
 
     for j, analyte in enumerate(sig_vars):
         key = cal_norm_key(cal_prefs, analyte, norm_map, ui_norm_key)
@@ -934,13 +1001,16 @@ def calibrate_all(lt_corr: np.ndarray, sig_vars: Sequence[str], display_names: S
         else:
             ex = parse_cal_exclusions(cal_prefs.loc[analyte, 'CalExclusions']) if analyte in cal_prefs.index else []
         weighting = cal_weighting(cal_prefs, analyte, ui_weighting)
-        auto_ex = [n for n, e_ in zip(names_plot, e_plot) if not (e_ <= MAX_CAL_ERR_PCT)] if weighting in ('ivw', 'logmean') else []
+        auto_ex = [n for n, e_ in zip(names_plot, e_plot) if not (e_ <= MAX_CAL_ERR_PCT)] if weighting in ('ivw', 'ivw0', 'logmean') else []
         inc = np.array([(n not in ex) and (n not in auto_ex) for n in names_plot], bool)
         if inc.sum() == 0:                     # never drop everything
             inc = np.array([n not in ex for n in names_plot], bool); auto_ex = []
         fz = cal_force_zero(cal_prefs, analyte, ui_force_zero)
-        if weighting in ('ivw', 'logmean'):
-            slope, r2, _ = weighted_log_slope(x_plot[inc], y_plot[inc], e_plot[inc], weighting)
+        key_of_point = np.concatenate([[k] * sets[k].size for k in calibrants])[fin]
+        if weighting in ('ivw', 'ivw0', 'logmean'):
+            off = np.array([offsets.get(k, 0.0) for k in key_of_point]) if weighting == 'ivw' else None
+            slope, r2, _ = weighted_log_slope(x_plot[inc], y_plot[inc], e_plot[inc], weighting,
+                                              None if off is None else off[inc])
             intercept = 0.0
             fz = True
         elif weighting == 'ols' or not fz:
@@ -951,17 +1021,16 @@ def calibrate_all(lt_corr: np.ndarray, sig_vars: Sequence[str], display_names: S
             intercept = 0.0
         elements.append(CalElement(analyte, key, set_name, fz, x_plot, y_plot, names_plot, ex,
                                    slope, intercept, r2, weighting, calibrants, e_plot, auto_ex))
-
-    final = np.zeros_like(lt_corr, dtype=float)
-    for j, el in enumerate(elements):
-        oxide_col = norm_map[el.norm_key]['oxideCol']
-        if oxide_col in intervals.columns:
-            ox = pd.to_numeric(intervals[oxide_col], errors='coerce').to_numpy(float)
-        else:
-            ox = np.zeros(n_samples)
-        ox = np.where(np.isnan(ox), 0.0, ox)
-        final[:, j] = (meas_all_cols[j] * el.slope + el.intercept) * ox
-    return elements, final
+        # per-standard log(measured*slope/target) and counting error, for the common offsets
+        if np.isfinite(slope) and slope > 0:
+            for k in calibrants:
+                mk = (key_of_point == k) & inc
+                if mk.any():
+                    with np.errstate(divide='ignore', invalid='ignore'):
+                        d = np.log(x_plot[mk] * slope / y_plot[mk])
+                    log_dev.setdefault(k, {})[analyte] = float(np.nanmedian(d))
+                    err_by_std.setdefault(k, {})[analyte] = float(np.nanmedian(e_plot[mk]))
+    return elements, meas_all_cols, log_dev, err_by_std
 
 
 # ----------------------------------------------------------------------------

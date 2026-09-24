@@ -98,3 +98,24 @@ def test_auto_method_switch():
     assert core._auto_method(7, 3.0) == 'poly2'
     assert core._auto_method(2, 0.1) == 'linear'
     assert core._auto_method(1, 0.1) == 'none'
+
+
+def test_robust_slope_downweights_bad_reference():
+    # 14 points agreeing at slope 2, 7 points (one "standard") 15 % off: robust ivw ignores them, ivw0 does not
+    X = np.concatenate([np.ones(7), 2 * np.ones(7), np.ones(7)])
+    Y = np.concatenate([2 * np.ones(7), 4 * np.ones(7), 2 * 0.85 * np.ones(7)])
+    E = np.full(21, 0.5)
+    s_rob, _, _ = core.weighted_log_slope(X, Y, E, 'ivw')
+    s_plain, _, _ = core.weighted_log_slope(X, Y, E, 'ivw0')
+    assert s_rob == pytest.approx(2.0, rel=1e-3)
+    assert 1.85 < s_plain < 1.97
+
+
+def test_common_offsets_centre_to_zero():
+    dev = {'A': {f'e{i}': 0.03 for i in range(6)}, 'B': {f'e{i}': -0.01 for i in range(6)}}
+    err = {'A': {f'e{i}': 1.0 for i in range(6)}, 'B': {f'e{i}': 1.0 for i in range(6)}}
+    c = core.standard_common_offsets(dev, err)
+    assert c['A'] == pytest.approx(0.02) and c['B'] == pytest.approx(-0.02)
+    err['A'] = {f'e{i}': 9.0 for i in range(6)}       # too noisy to define an offset
+    c = core.standard_common_offsets(dev, err)
+    assert c['A'] == pytest.approx(0.005) and c['B'] == pytest.approx(-0.005)

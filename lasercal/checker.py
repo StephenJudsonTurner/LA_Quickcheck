@@ -521,6 +521,9 @@ def write_report(path, s: ReductionSession, kind, src, winfo, drift, excl, cal_d
 
     sets_txt = ', '.join(f'{k} ×{s.sets[k].size}' for k in core.STANDARD_TAGS if s.sets[k].size)
     n_auto = sum(len(el.auto_excluded) for el in s.cal_elements)
+    offs = next((el.offsets for el in s.cal_elements if el.offsets), {})
+    off_html = (' Per-standard common offsets absorbed by the calibration (a standard reading uniformly high or low across '
+                'elements): ' + ', '.join(f'{e(k)} {100 * v:+.1f} %' for k, v in offs.items()) + '.') if offs else ''
     by_norm = {}
     for el in s.cal_elements:
         by_norm.setdefault(s.norm_map[el.norm_key]['iso'], []).append(el.analyte)
@@ -541,7 +544,7 @@ td,th{{border:1px solid #d1d5db;padding:3px 8px;text-align:right}}th{{background
 <li>Background: 1 s to laser-on − 2 s. Signal: laser-on + {SIGNAL_DELAY_S:g} s for {winfo['signal_length_s']:.1f} s (laser-on median {winfo['laser_on_median_s']:.1f} s, standards' ablation median {winfo['ablation_median_s']:.1f} s). Second background: {winfo['second_background']}.</li>
 {short_html}
 <li>Drift: {e(drift[2])}.</li>
-<li>Calibration: BHV, BCR, BIR vs GeoRem values. Normaliser chosen per analyte from the standards (lowest replicate RSD and cross-standard spread in quadrature, <code>data/NormaliserChoice.xlsx</code>): {norm_html}; slope = inverse-variance weighted mean of log(target/measured) over the calibrant replicates; {n_auto} replicate values dropped for counting error &gt; {core.MAX_CAL_ERR_PCT:g} %.{special_html}</li>
+<li>Calibration: BHV, BCR, BIR vs GeoRem values. Normaliser chosen per analyte from the standards (lowest replicate RSD and cross-standard spread in quadrature, <code>data/NormaliserChoice.xlsx</code>): {norm_html}; slope = inverse-variance weighted mean of log(target/measured) over the calibrant replicates (Tukey-biweight robust); {n_auto} replicate values dropped for counting error &gt; {core.MAX_CAL_ERR_PCT:g} %.{off_html}{special_html}</li>
 <li>Auto-excluded calibrant replicates (&gt; 4 robust σ and &gt; 10 % from their own standard's other replicates): {e('; '.join(f'{k}: {" ".join(v)}' for k, v in excl.items()) if excl else 'none')}.</li>
 <li>Internal-standard oxide wt% were autofilled for BHV, BCR, BIR, GSD, GSE, StHS, VE32 and GOR-128 only. <b>{len(zero_rows)} samples have no oxide value and therefore read 0</b>: fill <code>data/Intervals.xlsx</code> and re-run the reduction.</li>
 </ul>

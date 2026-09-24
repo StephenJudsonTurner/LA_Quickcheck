@@ -53,7 +53,7 @@ Command line: `DataChecker.exe <input folder>` or `DataChecker.exe --rerun <..._
 | Background / signal | From the 25Mg trace of each analysis: background 1 s → laser-on − 2 s; signal laser-on + 2 s for (standards' median ablation − 4 s), the same length for every sample. The first second carries a surface Pb/Cu spike and a sweep-timing artefact; the primaries are counting-limited, so the window is the whole ablation. An unknown that ablated for less gets its own (ablation − 4 s) window and is flagged in the report. Second background only when ≥ 12 s of clean blank follow the ablation. |
 | Drift | `ALL` / `auto`: every recognised standard in every bracket is pooled. For each element the ratio to its normaliser is divided by that standard's own count-weighted run mean, then averaged per bracket with weights 1/(counting error² + 0.5 %²). pchip through the bracket means when they are good to 1.5 %, quadratic otherwise. The factor applies to the ratio, so the normaliser isotope itself carries no correction. Set a single key (BHV …) and a MATLAB method per element in `DriftSelections.xlsx` to get the legacy single-standard model on the raw signal. |
 | Normaliser | Chosen per analyte from the run's own standards: every available normaliser (Al, Ca, Si) is tried on the whole run and the one with the lowest score, replicate RSD and cross-standard spread of apparent sensitivity in quadrature, is kept (`data/NormaliserChoice.xlsx`); the Al default survives unless another beats it by 0.2 %. On `09_21_26_50um`: 22 analytes on Al, 7 on Ca, 5 on Si (Na, Ni, Cu, Ce, Pb). |
-| Calibration | Slope = inverse-variance weighted mean of log(target / measured) over the BHV/BCR/BIR replicates (`Weighting` = `ivw`; `logmean`, `ols0` (legacy through-zero OLS), `ols` also available per element). Replicates with > 10 % counting error are dropped from the fit. `Calibrants` lists the standards used (any of BHV BCR BIR GSD GSE STH); default BHV BCR BIR except Cu, which uses BHV BIR because the BCR-2G Cu value is inconsistent with every other standard (`core.DEFAULT_CALIBRANTS`). GeoRem values. |
+| Calibration | Slope = inverse-variance weighted mean of log(target / measured) over the BHV/BCR/BIR replicates, made robust with a Tukey biweight (a replicate or a whole standard far from the consensus, e.g. a bad reference value, loses weight) and with a per-standard common offset (the median offset of a standard across its well-measured elements, which is an internal-standard-oxide or normaliser effect, is not allowed to bend the element slopes; offsets are centred so the scale stays the calibrants' mean). `Weighting` = `ivw`; `ivw0` (no robustness/offsets), `logmean`, `ols0` (legacy through-zero OLS), `ols` also available per element. Replicates with > 10 % counting error are dropped from the fit. `Calibrants` lists the standards used (any of BHV BCR BIR GSD GSE STH); default BHV BCR BIR except Cu, which uses BHV BIR because the BCR-2G Cu value is inconsistent with every other standard (`core.DEFAULT_CALIBRANTS`). GeoRem values. |
 | Exclusions | A calibrant replicate more than 4 robust σ and more than 10 % from its own standard's other replicates is excluded (never more than a third of a standard's points). Standard-to-standard offsets are reported in the consistency table, not "fixed". |
 | Oxide wt% | Autofilled for BHV, BCR, BIR, GSD, GSE, StHS, VE32, GOR-128. Unknowns read 0 until you enter their Al2O3 / CaO in `data/Intervals.xlsx` and re-run. |
 
@@ -97,6 +97,17 @@ better only for Sr and Pb, selectable per element via `StandardSet`). For Pb, cl
 of the early signal does not help: the surface spike is confined to the first second, and the
 ±9 % BHV/BCR disagreement is the BCR-2G reference value (calibrating Pb on `BHV BIR` brings
 GSD to −1 % and StHs to +8 %).
+
+Other schemes tried on this run and rejected, so nobody repeats them: interpolating the
+normaliser to each analyte's dwell time inside the 0.39 s sweep (within-sweep ratio noise
+6.5 → 6.4 %, replicates unchanged); mean-of-ratios and MAD-clipped estimators instead of the
+ratio of window means (no gain, and clipping destroys the discrete low-count ratios of Cs, Ta,
+Th); composite normalisers such as √(Al·Ca) or a sum of the measured majors (no better than
+Ca alone, and Fe/Mn are not measured for a true 100 % sum); regularising the slopes of the
+low-count elements with a smooth sensitivity-vs-mass curve (the per-atom relative sensitivity
+scatters by ~9 % even along the REE); tuning the 0.5 % counting-error floor in the weights
+(0.25–0.5 % is the optimum). The robust calibration with common offsets was the one that
+survived: leave-one-standard-out median bias of the well-measured traces 1.9 → 1.6 %.
 
 Down-hole fractionation was assessed on the standards and nothing is corrected. For
 full-length analyses no scheme helps: the window mean beats a linear-fit intercept two-fold in
